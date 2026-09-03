@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mobius - RAG Assistant</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+        :root {
+            --ink: #17212b;
+            --muted: #66727e;
+            --paper: #f5f4ef;
+            --panel: #fffefa;
+            --line: #d9ddd8;
+            --coral: #e5664f;
+            --coral-dark: #b84231;
+            --mint: #d5ece2;
+            --shadow: 0 18px 45px rgba(32, 48, 54, 0.09);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            background: var(--paper);
+            color: var(--ink);
+            font-family: 'Space Grotesk', sans-serif;
+            margin: 0;
+            min-height: 100vh;
+            padding: 56px 24px;
+        }
+
+        body::before {
+            background-image: linear-gradient(rgba(23, 33, 43, 0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(23, 33, 43, 0.035) 1px, transparent 1px);
+            background-size: 28px 28px;
+            content: '';
+            inset: 0;
+            pointer-events: none;
+            position: fixed;
+            z-index: -1;
+        }
+
+        main, body > h2, body > .box { margin-left: auto; margin-right: auto; max-width: 920px; }
+
+        body::after {
+            background: var(--mint);
+            border-radius: 50%;
+            content: '';
+            height: 280px;
+            opacity: 0.55;
+            position: fixed;
+            right: -120px;
+            top: -100px;
+            width: 280px;
+            z-index: -1;
+        }
+
+        h2 { font-size: 1.1rem; letter-spacing: 0; margin: 0 0 14px; }
+        body > h2:first-child { font-size: clamp(2rem, 5vw, 3.5rem); letter-spacing: -0.04em; margin-bottom: 24px; }
+        body > h2:first-child::before { color: var(--coral); content: 'MOBIUS / '; font-family: 'DM Mono', monospace; font-size: 0.72em; letter-spacing: 0.03em; }
+
+        .box {
+            background: rgba(255, 254, 250, 0.9);
+            border: 1px solid var(--line);
+            border-radius: 5px;
+            box-shadow: var(--shadow);
+            margin-bottom: 22px;
+            padding: 28px;
+        }
+
+        #chat-section { display: {% if uploaded %}block{% else %}none{% endif %}; }
+        form { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; }
+        input[type="file"] { color: var(--muted); font-family: 'DM Mono', monospace; font-size: 0.78rem; max-width: 100%; }
+        input[type="file"]::file-selector-button { background: var(--ink); border: 0; border-radius: 3px; color: white; cursor: pointer; font: inherit; margin-right: 10px; padding: 10px 14px; }
+        p { line-height: 1.6; }
+        strong { font-weight: 600; }
+        textarea { background: #fbfbf7; border: 1px solid #b9c2bf; border-radius: 3px; color: var(--ink); display: block; font: 1rem/1.5 'Space Grotesk', sans-serif; min-height: 125px; padding: 14px; resize: vertical; width: 100%; }
+        textarea:focus { border-color: var(--coral); box-shadow: 0 0 0 3px rgba(229, 102, 79, 0.14); outline: none; }
+        button { background: var(--coral); border: 0; border-radius: 3px; color: white; cursor: pointer; font: 600 0.9rem 'Space Grotesk', sans-serif; padding: 11px 17px; transition: background 160ms ease, transform 160ms ease; }
+        button:hover { background: var(--coral-dark); transform: translateY(-1px); }
+        button:active { transform: translateY(0); }
+        #loading { color: var(--muted); font-family: 'DM Mono', monospace; font-size: 0.76rem; margin-top: 14px !important; }
+        .answer { background: var(--mint); border-left: 4px solid var(--coral); margin-top: 22px; padding: 16px 18px; }
+        .answer p { margin-bottom: 0; }
+        .sources { color: var(--muted); font-family: 'DM Mono', monospace; font-size: 0.72rem; margin-top: 18px; }
+        .sources ul { padding-left: 22px; }
+        .sources li { margin: 8px 0; }
+
+        @media (max-width: 600px) {
+            body { padding: 28px 14px; }
+            .box { padding: 20px; }
+            body > h2:first-child { font-size: 2.25rem; }
+            form { align-items: stretch; flex-direction: column; }
+            form button { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+
+    <h2>1. Upload PDF Document</h2>
+    <div class="box">
+        <form action="/upload" method="POST" enctype="multipart/form-data">
+            <input type="file" name="pdf" accept=".pdf" required>
+            <button type="submit">Upload & Index</button>
+        </form>
+        {% if filename %}
+            <p><strong>Active File:</strong> {{ filename }}</p>
+        {% endif %}
+    </div>
+
+    <div id="chat-section" class="box">
+        <h2>2. Ask Questions</h2>
+        <textarea id="questionInput" placeholder="Ask something about your document..."></textarea>
+        <button onclick="askQuestion()">Ask LLM</button>
+
+        <div id="loading" style="display:none; margin-top:10px;">Searching chunks & generating answer...</div>
+        <div id="responseContainer"></div>
+    </div>
+
+    <script>
+        async function askQuestion() {
+            const query = document.getElementById("questionInput").value;
+            const loading = document.getElementById("loading");
+            const responseContainer = document.getElementById("responseContainer");
+
+            if (!query.trim()) return;
+
+            loading.style.display = "block";
+            responseContainer.innerHTML = "";
+
+            try {
+                const res = await fetch("/ask", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ query: query })
+                });
+
+                const responseText = await res.text();
+                let data;
+                try {
+                    data = JSON.parse(responseText);
+                } catch {
+                    throw new Error(`Server returned HTTP ${res.status}.`);
+                }
+                loading.style.display = "none";
+
+                if (res.ok) {
+                    responseContainer.innerHTML = `
+                        <div class="answer">
+                            <strong>Answer:</strong>
+                            <p>${data.answer}</p>
+                        </div>
+                        <div class="sources">
+                            <strong>Retrieved Chunks:</strong>
+                            <ul>${data.sources.map(s => `<li>${s}</li>`).join('')}</ul>
+                        </div>
+                    `;
+                } else {
+                    responseContainer.innerHTML = `<p style="color:red;">Error: ${data.error || `Request failed with HTTP ${res.status}.`}</p>`;
+                }
+            } catch (err) {
+                loading.style.display = "none";
+                responseContainer.innerHTML = `<p style="color:red;">${err.message || "Failed to reach server."}</p>`;
+            }
+        }
+    </script>
+
+</body>
+</html>
