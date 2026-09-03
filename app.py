@@ -1,11 +1,14 @@
 # app.py
 import os
+import gc
 from dotenv import load_dotenv
 
 # Load variables from .env file
 load_dotenv()
 
 from flask import Flask, render_template, request, jsonify
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.utils import secure_filename
 from services.pdf_reader import extract_text
 from services.chunker import create_chunks
 from services.embeddings import create_embeddings as get_embeddings
@@ -15,7 +18,9 @@ from services.llm_service import generate_answer
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "data/uploads"
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # In-memory storage for active session (for single-user local dev)
@@ -35,26 +40,41 @@ def upload():
     if not file or file.filename == "":
         return "Please select a PDF file.", 400
 
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
-    file.save(file_path)
+    filename = secure_filename(file.filename)
+    if not filename.lower().endswith(".pdf"):
+        return "Please upload a PDF file.", 400
 
-    # 1. Extract & Chunk
-    text = extract_text(file_path)
-    chunks = create_chunks(text)
-    
-    # 2. Generate Embeddings & Build FAISS Index
-    chunk_embeddings = get_embeddings(chunks)
-    index = create_index(chunk_embeddings)
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
 
-    # 3. Cache state in memory
-    CURRENT_DATA["chunks"] = chunks
-    CURRENT_DATA["index"] = index
+    try:
+        file.save(file_path)
+        CURRENT_DATA["chunks"] = []
+        CURRENT_DATA["index"] = None
+        gc.collect()
+
+        text = extract_text(file_path)
+        chunks = create_chunks(text)
+        if not chunks:
+            return "The PDF did not contain extractable text.", 400
+
+        chunk_embeddings = get_embeddings(chunks)
+        index = create_index(chunk_embeddings)
+        CURRENT_DATA["chunks"] = chunks
+        CURRENT_DATA["index"] = index
+    except Exception:
+        app.logger.exception("PDF upload and indexing failed for %s", filename)
+        return jsonify({
+            "error": "The PDF could not be processed. Try a smaller, text-based PDF."
+        }), 500
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
     return render_template(
         "index.html",
         text=text,
         chunks=chunks,
-        filename=file.filename,
+        filename=filename,
         uploaded=True
     )
 
@@ -66,20 +86,17 @@ def ask():
     if not user_query:
         return jsonify({"error": "Please enter a question."}), 400
     
-    if not CURRENT_DATA["index"] or not CURRENT_DATA["chunks"]:
+    if CURRENT_DATA["index"] is None or not CURRENT_DATA["chunks"]:
         return jsonify({"error": "Please upload a PDF document first."}), 400
 
-    # 1. Embed query & retrieve relevant chunks
-    query_embedding = get_embeddings([user_query])[0]
-    relevant_chunks = search_index(
-        query_embedding, 
-        CURRENT_DATA["index"], 
-        CURRENT_DATA["chunks"], 
-        k=3
-    )
-
-    # 2. Pass context to LLM
     try:
+        query_embedding = get_embeddings([user_query])[0]
+        relevant_chunks = search_index(
+            query_embedding,
+            CURRENT_DATA["index"],
+            CURRENT_DATA["chunks"],
+            k=3
+        )
         answer = generate_answer(user_query, relevant_chunks)
     except ValueError as error:
         return jsonify({"error": str(error)}), 503
@@ -96,5 +113,14 @@ def ask():
         "sources": relevant_chunks
     })
 
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_large_upload(error):
+    return jsonify({"error": "PDF uploads must be 10 MB or smaller."}), 413
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        debug=os.environ.get("FLASK_DEBUG") == "1"
+    )

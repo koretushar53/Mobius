@@ -2,9 +2,9 @@
 import os
 import re
 from groq import Groq
-import dotenv
+from dotenv import load_dotenv
 
-dotenv.load_dotenv(override=True)
+load_dotenv()
 
 class DocumentAgent:
     """Groq agent constrained to answering from retrieved document context."""
